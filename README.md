@@ -3,7 +3,9 @@
 Download course files in a compressed zip from a Moodle course and external sources.
 
 
-https://github.com/user-attachments/assets/083c5e6e-e04c-451e-ac8e-e7693183d08b
+https://github.com/user-attachments/assets/094f3771-d49e-41bc-bbb8-9c3a2cb0d697
+
+
 
 ## What it does
 
