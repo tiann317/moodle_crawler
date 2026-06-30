@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Moodle Course Downloader</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 460px;
+      margin: 40px auto;
+      padding: 0 16px;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; }
+    label { display: block; margin-top: 14px; font-weight: 600; font-size: .9rem; }
+    input {
+      width: 100%;
+      padding: 9px 11px;
+      margin-top: 4px;
+      border: 1px solid #888;
+      border-radius: 6px;
+      font-size: 1rem;
+    }
+    button {
+      margin-top: 20px;
+      width: 100%;
+      padding: 11px;
+      font-size: 1rem;
+      font-weight: 600;
+      border: 0;
+      border-radius: 6px;
+      background: #2563eb;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled { background: #888; cursor: not-allowed; }
+    .note { font-size: .8rem; opacity: .7; margin-top: 8px; }
+
+    #progressWrap { margin-top: 48px; display: none; }
+    #status { font-size: .9rem; font-weight: 600; }
+    .bar {
+      height: 12px;
+      background: #0002;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: #2563eb;
+      transition: width .3s ease;
+    }
+    #count { font-size: .8rem; opacity: .7; margin-top: 6px; }
+    #files {
+      margin-top: 14px;
+      list-style: none;
+      padding: 0;
+      max-height: 520px;
+      overflow-y: auto;
+      font-size: .85rem;
+    }
+    #files li {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-bottom: 1px solid #8883;
+    }
+    #files li .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #files li .icon {
+      flex: none;
+      width: 64px;
+      height: 64px;
+      font-size: 40px;
+      line-height: 64px;
+      text-align: center;
+    }
+    .error { color: #dc2626; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Moodle Course Downloader</h1>
+  <p class="note">Enter a Moodle course URL and your login. A zip of all pages and files downloads automatically.</p>
+
+  <form id="form">
+    <label>Course URL
+      <input id="courseUrl" type="url" required
+             placeholder="https://moodle.hs-augsburg.de/course/view.php?id=10582" />
+    </label>
+    <label>Username
+      <input id="username" type="text" required autocomplete="username" />
+    </label>
+    <label>Password
+      <input id="password" type="password" required autocomplete="current-password" />
+    </label>
+    <button id="submit" type="submit">Download course</button>
+  </form>
+
+  <div id="progressWrap">
+    <div id="status">Starting…</div>
+    <div class="bar"><span id="barFill"></span></div>
+    <div id="count"></div>
+    <ul id="files"></ul>
+  </div>
+
+  <script>
+    const form = document.getElementById("form");
+    const btn = document.getElementById("submit");
+    const wrap = document.getElementById("progressWrap");
+    const status = document.getElementById("status");
+    const barFill = document.getElementById("barFill");
+    const count = document.getElementById("count");
+    const files = document.getElementById("files");
+
+    function triggerDownload(jobId, name) {
+      const a = document.createElement("a");
+      a.href = "/download/" + jobId;
+      a.download = (name || "moodle-course") + ".zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      btn.disabled = true;
+      wrap.style.display = "block";
+      status.className = "";
+      status.textContent = "Starting…";
+      barFill.style.width = "0%";
+      count.textContent = "";
+      files.innerHTML = "";
+
+      const payload = {
+        courseUrl: document.getElementById("courseUrl").value.trim(),
+        username: document.getElementById("username").value,
+        password: document.getElementById("password").value,
+      };
+
+      let jobId;
+      try {
+        const res = await fetch("/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          let msg = "Request failed (" + res.status + ").";
+          try { msg = (await res.json()).error || msg; } catch {}
+          throw new Error(msg);
+        }
+        jobId = (await res.json()).jobId;
+      } catch (err) {
+        status.className = "error";
+        status.textContent = "Error: " + err.message;
+        btn.disabled = false;
+        return;
+      }
+
+      const es = new EventSource("/events/" + jobId);
+      let fileCount = 0;
+      let maxPercent = 0;
+      let finished = false;
+
+      function finish() {
+        finished = true;
+        es.close();
+        btn.disabled = false;
+      }
+
+      es.onmessage = (m) => {
+        const evt = JSON.parse(m.data);
+        switch (evt.type) {
+          case "status":
+            status.textContent = evt.text;
+            break;
+          case "progress": {
+            const pct = evt.total > 0 ? Math.round((evt.processed / evt.total) * 100) : 0;
+            maxPercent = Math.max(maxPercent, pct);
+            barFill.style.width = maxPercent + "%";
+            break;
+          }
+          case "file": {
+            fileCount++;
+            count.textContent = fileCount + " file" + (fileCount === 1 ? "" : "s") + " downloaded";
+            const li = document.createElement("li");
+            li.title = evt.name;
+
+            const ext = evt.name.split(".").pop().toLowerCase();
+            const icon = {
+              pdf: "pdf_icon.svg",
+              docx: "docx_icon.svg",
+              csv: "csv_icon.svg",
+              html: "html_icon.svg",
+              ipynb: "ipynb_icon.svg",
+              pptx: "pptx_icon.svg",
+              xlsx: "xlsx_icon.svg",
+              zip: "zip_icon.svg",
+            }[ext];
+            if (icon) {
+              const img = document.createElement("img");
+              img.className = "icon";
+              img.src = "/icons/" + icon;
+              img.alt = "";
+              li.appendChild(img);
+            } else {
+              const span = document.createElement("span");
+              span.className = "icon";
+              span.textContent = "📄";
+              li.appendChild(span);
+            }
+
+            const name = document.createElement("span");
+            name.className = "name";
+            name.textContent = evt.name;
+            li.appendChild(name);
+
+            files.appendChild(li);
+            files.scrollTop = files.scrollHeight;
+            break;
+          }
+          case "done":
+            barFill.style.width = "100%";
+            status.textContent =
+              "Crawl complete — " + evt.pages + " pages, " + evt.files + " files. Packaging zip…";
+            break;
+          case "ready":
+            status.textContent = "Done — your download has started.";
+            triggerDownload(jobId, evt.name);
+            finish();
+            break;
+          case "error":
+            status.className = "error";
+            status.textContent = "Error: " + evt.message;
+            finish();
+            break;
+        }
+      };
+
+      es.onerror = () => {
+        if (!finished) {
+          status.className = "error";
+          status.textContent = "Connection to server lost.";
+          finish();
+        }
+      };
+    });
+  </script>
+</body>
+</html>
